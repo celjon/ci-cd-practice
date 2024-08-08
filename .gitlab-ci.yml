@@ -1,0 +1,90 @@
+stages:
+  - test
+  - build
+  - functional-tests
+  - deploy
+
+variables:
+    IMAGE_NAME: web_calculator
+    IMAGE_TAG: 0.0.$CI_PIPELINE_IID
+
+pytest:
+  stage: test
+  image: python:3.10
+  script:
+    - pip install -r requirements.txt
+    - pytest --junitxml=junit.xml tests/unit_tests
+  artifacts:
+    reports:
+      junit: junit.xml
+
+.docker-registry-auth:
+    before_script:
+        - mkdir -p /kaniko/.docker
+        - echo "{\"auths\":{\"${CI_REGISTRY}\":{\"auth\":\"$(printf "%s:%s" "${CI_REGISTRY_USER}" "${CI_REGISTRY_PASSWORD}" | base64 | tr -d '\n')\"}}}" > /kaniko/.docker/config.json
+
+.build-docker-kaniko:
+  stage: build
+  image:
+    name: gcr.io/kaniko-project/executor:debug
+    entrypoint: [""]
+  extends: .docker-registry-auth
+  script:
+    - >-
+      /kaniko/executor
+      --context "${CONTEXT_PATH}"
+      --dockerfile "${DOCKERFILE_PATH}"
+      --cache-copy-layers
+      --destination "${CI_REGISTRY_IMAGE}/$IMAGE_NAME:$IMAGE_TAG"
+      --cache=true
+
+build-docker:
+  extends: .build-docker-kaniko
+  variables:
+    DOCKERFILE_PATH: Dockerfile
+    CONTEXT_PATH: ${CI_PROJECT_DIR}
+
+functional-tests:
+  stage: functional-tests
+  image: python:3.10
+  services:
+  - name: ${CI_REGISTRY_IMAGE}/$IMAGE_NAME:$IMAGE_TAG
+    alias: web-calculator
+  script:
+    - pip install -r requirements.txt
+    - pytest --junitxml=junit.xml tests/functional_tests
+  artifacts:
+    reports:
+      junit: junit.xml
+
+
+.ssh-connection-from-docker:
+    before_script:
+      - apk add openssh-client bash
+      - eval $(ssh-agent -s)
+      - mkdir -p ~/.ssh
+      - ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N ''
+      - echo "$SSH_KNOWN_HOSTS" >> ~/.ssh/known_hosts
+      - chmod 700 ~/.ssh
+      - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+      - docker context create calculator-web-app --docker "host=ssh://${DEPLOY_URL}"
+      - docker context use calculator-web-app
+      - |
+        cat > .env <<EOF
+        CI_REGISTRY_IMAGE=${CI_REGISTRY_IMAGE}
+        DOCKER_IMAGE_NAME=$IMAGE_NAME
+        IMAGE_VERSION=$IMAGE_TAG
+        APP_URL=$APP_URL
+        EOF
+
+    after_script:
+      - rm .env
+
+deploy-app:
+  stage: deploy
+  image: docker:24.0.7-dind-alpine3.18
+  extends: .ssh-connection-from-docker
+  when: manual
+  script:
+    - bash ./deploy_blue_green.sh
+    - docker --context calculator-web-app ps

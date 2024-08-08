@@ -1,0 +1,15 @@
+.tox/
+.venv/
+venv/
+dist/
+build/
+*.egg-info
+.coverage
+.github/
+coverage.xml
+.gitignore
+README.md
+.gitlab-ci.yml
+tests
+.env
+.sh
